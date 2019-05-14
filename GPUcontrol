@@ -1,0 +1,124 @@
+#!/bin/bash
+sleep 30
+
+#генерируем xorg.conf
+sudo nvidia-xconfig -a --allow-empty-initial-configuration --cool-bits=12
+sleep 1
+
+#перезапускаем x-server
+sudo service lightdm stop
+sleep 2
+sudo service lightdm start
+sleep 2
+
+#вкл ручное управление скоростью вращения кулерами
+sudo nvidia-settings -c :0 -a GPUFanControlState=1
+
+#вкл режим управления мощьностью ГПУ
+sudo nvidia-smi -pm 1
+
+cd
+
+#записываем данные из GPUsettings в массив settings[i]
+
+read -r string < GPUsettings
+IFS=:
+settings=($string)
+
+#кол-во ГПУ в риге
+cp /dev/null GPUtemp
+sudo nvidia-smi -L >> GPUtemp
+summgpu=$(cat ./GPUtemp | wc -l)
+
+#проверка корректности параметра скорости вентиляторов
+if settings[4] -gt 100
+then settings[4]=70
+fi
+if settings[4] -lt 10
+then settings[4]=70
+fi
+
+#проверка корректности параметра темпиратурного лимита
+if settings[1] -gt 90
+then settings[1]=70
+fi
+if settings[1] -lt 40
+then settings[1]=40
+fi
+
+
+#устанавливаем скорость вентиляторов для всех ГПУ
+sudo nvidia-settings -c :0 -a GPUTargetFanSpeed=${settings[4]}
+
+#разгоняем частоту ядра и частоту памяти ГПУ
+for (( l = 2; l <= 6; l++ ))
+do
+        sudo nvidia-settings -c :0 -a GPUGraphicsClockOffset[$l]=${settings[2]}
+        sudo nvidia-settings -c :0 -a GPUMemoryTransferRateOffset[$l]=${settings[3]}
+done
+
+
+#записываем в переменные значения plim, minplim, maxplim для каждой ГПУ
+for (( k = 0; k < summgpu; k++ ))
+do
+        cp /dev/null GPUtemp
+        sudo nvidia-smi -i $k --query-gpu=power.min_limit --format=csv,noheader >> GPUtemp
+        minplim[$k]=$(awk -F. '{print $1}' ./GPUtemp)
+        cp /dev/null GPUtemp
+        sudo nvidia-smi -i $k --query-gpu=power.max_limit --format=csv,noheader >> GPUtemp
+        maxplim[$k]=$(awk -F. '{print $1}' ./GPUtemp)
+        plim[$k]=${settings[0]}
+        if settings[0] -gt  maxplim[$k]
+        then plim[$k]=${maxplim[$k]}-10
+        fi
+        if settings[0] -lt minplim[$k]
+        then plim[$k]=${minplim[$k]}+10
+        fi
+        ptec1[$k]=${plim[$k]}
+        ptec2[$k]=${plim[$k]}
+        sudo nvidia-smi -i $k -pl ${plim[$k]}
+        #echo "plim $k : ${plim[$k]}"
+done
+
+mintlim=10
+
+#бесконечный цикл для контроля темпиратуры
+n=1
+while [ $n -gt 0 ]; do
+        for (( k = 0; k < summgpu; k++ ))
+        do
+                temp[$k]=$(sudo nvidia-smi -i $k --query-gpu=temperature.gpu --format=csv,noheader)
+                echo "temp $k = ${temp[$k]}"
+                if [ ${temp[$k]} -ge ${settings[1]} ]
+                then
+                        pdelta=$(( ${ptec2[$k]} - 5 ))
+                        if [ $pdelta -ge ${minplim[$k]} ]
+                        then
+                                ptec2[$k]=$(( ${ptec2[$k]} - 5 ))
+                        fi
+                fi
+                tdelta=$(( ${settings[1]} - 2 ))
+                if [ ${temp[$k]} -lt $tdelta ]
+                then
+                        pdelta=$(( ${ptec2[$k]} + 5 ))
+                        if [ $pdelta -le ${plim[$k]} ]
+                        then
+                                ptec2[$k]=$(( ${ptec2[$k]} + 5 ))
+                        fi
+                fi
+                if [ ${ptec1[$k]} -ne ${ptec2[$k]} ]
+                then
+                        sudo nvidia-smi -i $k -pl ${ptec2[$k]}
+                        ptec1[$k]=${ptec2[$k]}
+                else
+                        echo "no change plim $k = ${ptec2[$k]} "
+                fi
+        done
+        sleep 1
+done
+
+
+
+
+
+
